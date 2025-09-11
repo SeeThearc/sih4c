@@ -16,8 +16,8 @@ contract EmergencyManager {
         _;
     }
 
-    constructor() {
-        admin = msg.sender;
+    constructor(address _admin) {
+        admin = _admin;
         paused = false;
     }
 

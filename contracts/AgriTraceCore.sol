@@ -49,7 +49,7 @@ contract AgriTraceCore {
 
     constructor() {
         admin = msg.sender;
-        emergency = new EmergencyManager();
+        emergency = new EmergencyManager(msg.sender);
         roles[msg.sender] = AgriTraceLib.Role.ADMIN;
         reputationScores[AgriTraceLib.Role.FARMER][msg.sender] = 50;
         reputationScores[AgriTraceLib.Role.DISTRIBUTOR][msg.sender] = 50;
