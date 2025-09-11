@@ -31,6 +31,11 @@ contract AgriTraceCore {
     mapping(uint256 => AgriTraceLib.Quality) public distributorQuality;
     mapping(uint256 => AgriTraceLib.Quality) public retailerQuality;
 
+    //users
+    // User details IPFS hash (profile, license, etc.)
+    mapping(address => string) public userDataHash;
+
+
     uint256 public constant MIN_TEMP = 5;
 
     event ProductCreated(uint256 indexed id, address indexed farmer);
@@ -59,6 +64,22 @@ contract AgriTraceCore {
             reputationScores[AgriTraceLib.Role.DISTRIBUTOR][user] = 50;
         if (reputationScores[AgriTraceLib.Role.RETAILER][user] == 0) 
             reputationScores[AgriTraceLib.Role.RETAILER][user] = 50;
+    }
+
+    // if want self register
+    function registerUser(AgriTraceLib.Role role, string calldata detailsHash) public {
+    require(roles[msg.sender] == AgriTraceLib.Role.NONE, "Already registered");
+    require(role != AgriTraceLib.Role.ADMIN, "Cannot self-register as admin");
+    require(bytes(detailsHash).length > 0, "Details hash required");
+
+    // Assign role
+    roles[msg.sender] = role;
+
+    // Initialize reputation
+    reputationScores[role][msg.sender] = 50;
+
+    // Store IPFS hash of user details
+    userDataHash[msg.sender] = detailsHash;
     }
 
     function getRole(address user) external view returns (AgriTraceLib.Role) {
@@ -397,6 +418,24 @@ contract AgriTraceCore {
         require(!emergency.blacklisted(msg.sender), "User blacklisted"); 
         _; 
     }
+
+    //fetch from ipfs
+    function getUserDetails(address user) external view returns (
+        AgriTraceLib.Role role,
+        uint256 farmerReputation,
+        uint256 distributorReputation,
+        uint256 retailerReputation,
+        string memory detailsHash
+    ) {
+        return (
+            roles[user],
+            reputationScores[AgriTraceLib.Role.FARMER][user],
+            reputationScores[AgriTraceLib.Role.DISTRIBUTOR][user],
+            reputationScores[AgriTraceLib.Role.RETAILER][user],
+            userDataHash[user]
+        );
+    }
+
     /**
  * @dev Get complete product trace with all data including IPFS hashes
  * This is the main function your frontend should call for tracing
