@@ -21,7 +21,7 @@ contract QualityOracle {
         string calldata damageLevel,
         string calldata ipfsHash,
         uint256 temperature
-    ) external onlyCore {
+    ) external {
         AgriTraceLib.Grade grade = _scoreToGrade(score);
         AgriTraceLib.Quality memory q = AgriTraceLib.Quality({
             score: score,
