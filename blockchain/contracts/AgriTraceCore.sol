@@ -3,9 +3,11 @@ pragma solidity ^0.8.19;
 
 import "./AgriTraceLib.sol";
 import "./EmergencyManager.sol";
+import "./TemperatureOracle.sol";
 
 contract AgriTraceCore {
     using AgriTraceLib for *;
+    TemperatureOracle public temperatureOracle;
 
     EmergencyManager public emergency;
     mapping(address => AgriTraceLib.Role) public roles;
@@ -31,21 +33,25 @@ contract AgriTraceCore {
     mapping(uint256 => AgriTraceLib.Quality) public distributorQuality;
     mapping(uint256 => AgriTraceLib.Quality) public retailerQuality;
 
+    // Track which products are in which batch
+    mapping(uint256 => uint256) public productToBatch; // productId => batchId
+    mapping(uint256 => bool) public productRemovedFromBatch; // productId => removed status
+
     //users
     // User details IPFS hash (profile, license, etc.)
     mapping(address => string) public userDataHash;
 
-
     uint256 public constant MIN_TEMP = 5;
 
     event ProductCreated(uint256 indexed id, address indexed farmer);
-    event ProductTransferred(uint256 indexed id, address indexed from, address indexed to);
+    event ProductPurchased(uint256 indexed id, address indexed buyer, address indexed seller);
     event ProductStateChanged(uint256 indexed productId, AgriTraceLib.ProductState newState);
     event DataStored(uint256 indexed id, string ipfsHash, AgriTraceLib.Stage stage);
     event ProductRejected(uint256 indexed productId, string reason);
+    event ProductRemovedFromBatch(uint256 indexed productId, uint256 indexed batchId, string reason);
     event ProductBuyed(uint256 indexed productId, address indexed consumer, uint256 quantity);
     event BatchCreated(uint256 batchId, address distributor);
-    event BatchSentToRetailer(uint256 batchId, address retailer);
+    event BatchPurchased(uint256 batchId, address retailer);
 
     constructor() {
         admin = msg.sender;
@@ -54,6 +60,10 @@ contract AgriTraceCore {
         reputationScores[AgriTraceLib.Role.FARMER][msg.sender] = 50;
         reputationScores[AgriTraceLib.Role.DISTRIBUTOR][msg.sender] = 50;
         reputationScores[AgriTraceLib.Role.RETAILER][msg.sender] = 50;
+    }
+
+    function setTemperatureOracle(address _temperatureOracle) external onlyAdmin {
+        temperatureOracle = TemperatureOracle(_temperatureOracle);
     }
 
     function assignRole(address user, AgriTraceLib.Role role) external onlyAdmin {
@@ -66,20 +76,14 @@ contract AgriTraceCore {
             reputationScores[AgriTraceLib.Role.RETAILER][user] = 50;
     }
 
-    // if want self register
     function registerUser(AgriTraceLib.Role role, string calldata detailsHash) public {
-    require(roles[msg.sender] == AgriTraceLib.Role.NONE, "Already registered");
-    require(role != AgriTraceLib.Role.ADMIN, "Cannot self-register as admin");
-    require(bytes(detailsHash).length > 0, "Details hash required");
+        require(roles[msg.sender] == AgriTraceLib.Role.NONE, "Already registered");
+        require(role != AgriTraceLib.Role.ADMIN, "Cannot self-register as admin");
+        require(bytes(detailsHash).length > 0, "Details hash required");
 
-    // Assign role
-    roles[msg.sender] = role;
-
-    // Initialize reputation
-    reputationScores[role][msg.sender] = 50;
-
-    // Store IPFS hash of user details
-    userDataHash[msg.sender] = detailsHash;
+        roles[msg.sender] = role;
+        reputationScores[role][msg.sender] = 50;
+        userDataHash[msg.sender] = detailsHash;
     }
 
     function getRole(address user) external view returns (AgriTraceLib.Role) {
@@ -127,16 +131,21 @@ contract AgriTraceCore {
         emit DataStored(productId, ipfsHash, AgriTraceLib.Stage.FARM);
     }
 
-    // === DISTRIBUTION STAGE ===
-    function transferToDistributor(uint256 productId, address distributor, uint256 priceDist) external systemActive {
-        require(products[productId].farmData.farmer == msg.sender, "Only farmer");
+    // === DISTRIBUTION STAGE - BUYER-INITIATED ===
+    // MODIFIED: Product state remains PENDING_PICKUP after purchase
+    function purchaseFromFarmer(uint256 productId, uint256 priceDist) external systemActive {
+        require(roles[msg.sender] == AgriTraceLib.Role.DISTRIBUTOR, "Only distributor can buy");
         require(products[productId].currentStage == AgriTraceLib.Stage.FARM, "Must be FARM stage");
-        require(roles[distributor] == AgriTraceLib.Role.DISTRIBUTOR, "Distributor only");
+        require(products[productId].currentState == AgriTraceLib.ProductState.PENDING_PICKUP, "Not available for purchase");
+        require(products[productId].isActive, "Inactive product");
         require(priceDist > 0, "Invalid price");
         
+        address farmer = products[productId].farmData.farmer;
+        
         products[productId].currentStage = AgriTraceLib.Stage.DISTRIBUTION;
-        products[productId].currentState = AgriTraceLib.ProductState.RECEIVED;
-        products[productId].distributionData.distributor = distributor;
+        // CHANGED: Keep state as PENDING_PICKUP until batch is created
+        products[productId].currentState = AgriTraceLib.ProductState.PENDING_PICKUP;
+        products[productId].distributionData.distributor = msg.sender;
         products[productId].distributionData.priceDist = priceDist;
         products[productId].distributionData.receivedAt = block.timestamp;
 
@@ -144,30 +153,97 @@ contract AgriTraceCore {
         products[productId].farmerToDistributorTxId = nextTxId;
         
         transactions[nextTxId].txId = nextTxId;
-        transactions[nextTxId].from = msg.sender;
-        transactions[nextTxId].to = distributor;
+        transactions[nextTxId].from = farmer;
+        transactions[nextTxId].to = msg.sender;
         transactions[nextTxId].productId = productId;
         transactions[nextTxId].price = priceDist;
         transactions[nextTxId].timestamp = block.timestamp;
         
-        distributorTxIds[distributor].push(nextTxId);
-        farmerSoldProducts[msg.sender].push(productId);
+        distributorTxIds[msg.sender].push(nextTxId);
+        farmerSoldProducts[farmer].push(productId);
 
-        emit ProductTransferred(productId, msg.sender, distributor);
-        emit ProductStateChanged(productId, AgriTraceLib.ProductState.RECEIVED);
+        emit ProductPurchased(productId, msg.sender, farmer);
+        emit ProductStateChanged(productId, AgriTraceLib.ProductState.PENDING_PICKUP);
     }
 
-    function storeDistributorQuality(
+    // MODIFIED: Get unbatched products bought by distributor (PENDING_PICKUP state)
+    function getUnbatchedProductsByDistributor(address distributor) external view returns (uint256[] memory) {
+        uint256 count;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].distributionData.distributor == distributor && 
+                products[i].currentStage == AgriTraceLib.Stage.DISTRIBUTION &&
+                products[i].currentState == AgriTraceLib.ProductState.PENDING_PICKUP &&
+                productToBatch[i] == 0 && // Not in any batch
+                products[i].isActive) {
+                count++;
+            }
+        }
+        
+        uint256[] memory result = new uint256[](count);
+        uint256 idx;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].distributionData.distributor == distributor && 
+                products[i].currentStage == AgriTraceLib.Stage.DISTRIBUTION &&
+                products[i].currentState == AgriTraceLib.ProductState.PENDING_PICKUP &&
+                productToBatch[i] == 0 && // Not in any batch
+                products[i].isActive) {
+                result[idx] = i;
+                idx++;
+            }
+        }
+        return result;
+    }
+
+    // MODIFIED: Create batch and change product states from PENDING_PICKUP to RECEIVED
+    function createBatch(uint256[] calldata productIds) external systemActive returns (uint256) {
+        require(roles[msg.sender] == AgriTraceLib.Role.DISTRIBUTOR, "Only distributor");
+        require(productIds.length > 0, "Empty batch");
+        
+        for (uint256 i = 0; i < productIds.length; i++) {
+            require(products[productIds[i]].distributionData.distributor == msg.sender, "Not your product");
+            require(products[productIds[i]].currentState == AgriTraceLib.ProductState.PENDING_PICKUP, "Not pending pickup");
+            require(productToBatch[productIds[i]] == 0, "Already in batch");
+        }
+        
+        nextBatchId++;
+        
+        batches[nextBatchId].batchId = nextBatchId;
+        batches[nextBatchId].distributor = msg.sender;
+        batches[nextBatchId].productIds = productIds;
+        batches[nextBatchId].createdAt = block.timestamp;
+        batches[nextBatchId].isDistributedToRetailer = false;
+        
+        distributorBatches[msg.sender].push(nextBatchId);
+        
+        // Assign products to batch and change state to RECEIVED
+        for (uint256 i = 0; i < productIds.length; i++) {
+            productToBatch[productIds[i]] = nextBatchId;
+            // CHANGED: Now change state to RECEIVED when batch is created
+            products[productIds[i]].currentState = AgriTraceLib.ProductState.RECEIVED;
+            emit ProductStateChanged(productIds[i], AgriTraceLib.ProductState.RECEIVED);
+        }
+        
+        emit BatchCreated(nextBatchId, msg.sender);
+        
+        return nextBatchId;
+    }
+
+    // Quality assessment for distributor with ability to remove products from batch
+    function storeDistributorQualityWithOracle(
         uint256 productId,
         uint256 score,
         string calldata damageLevel,
-        uint256 temperature,
         string calldata ipfsHash
     ) external systemActive {
         require(products[productId].distributionData.distributor == msg.sender, "Only distributor");
         require(products[productId].currentStage == AgriTraceLib.Stage.DISTRIBUTION, "Must be DISTRIBUTION stage");
         require(score <= AgriTraceLib.MAX_SCORE, "Invalid score");
+        require(address(temperatureOracle) != address(0), "Temperature oracle not set");
+        require(productToBatch[productId] > 0, "Product not in batch");
+        require(!productRemovedFromBatch[productId], "Product already removed from batch");
+        require(products[productId].currentState == AgriTraceLib.ProductState.RECEIVED, "Must be received state");
         
+        uint256 temperature = temperatureOracle.getCurrentTemperature(productId);
         AgriTraceLib.Grade grade = _scoreToGrade(score);
         
         distributorQuality[productId].score = score;
@@ -182,8 +258,10 @@ contract AgriTraceCore {
         products[productId].overallGrade = grade;
 
         if (temperature < MIN_TEMP || grade == AgriTraceLib.Grade.REJECTED) {
-            products[productId].isActive = false;
+            // Remove product from batch instead of making entire product inactive
+            productRemovedFromBatch[productId] = true;
             products[productId].currentState = AgriTraceLib.ProductState.REJECTED;
+            emit ProductRemovedFromBatch(productId, productToBatch[productId], "Quality failed");
             emit ProductRejected(productId, "Quality failed");
         } else {
             products[productId].currentState = AgriTraceLib.ProductState.VERIFIED;
@@ -195,48 +273,73 @@ contract AgriTraceCore {
         _updateReputation(productId, grade, AgriTraceLib.Stage.DISTRIBUTION);
     }
 
-    function createBatch(uint256[] calldata productIds) external systemActive returns (uint256) {
-        require(roles[msg.sender] == AgriTraceLib.Role.DISTRIBUTOR, "Only distributor");
-        require(productIds.length > 0, "Empty batch");
+    // Get products in a batch (excluding removed ones)
+    function getProductsInBatch(uint256 batchId) external view returns (uint256[] memory) {
+        require(batchId > 0 && batchId <= nextBatchId, "Invalid batch ID");
         
-        for (uint256 i = 0; i < productIds.length; i++) {
-            require(products[productIds[i]].distributionData.distributor == msg.sender, "Not your product");
-            require(products[productIds[i]].currentState == AgriTraceLib.ProductState.VERIFIED, "Not verified");
+        uint256[] memory allProducts = batches[batchId].productIds;
+        uint256 validCount;
+        
+        // Count valid products (not removed)
+        for (uint256 i = 0; i < allProducts.length; i++) {
+            if (!productRemovedFromBatch[allProducts[i]]) {
+                validCount++;
+            }
         }
         
-        nextBatchId++;
+        // Create result array with valid products only
+        uint256[] memory result = new uint256[](validCount);
+        uint256 idx;
+        for (uint256 i = 0; i < allProducts.length; i++) {
+            if (!productRemovedFromBatch[allProducts[i]]) {
+                result[idx] = allProducts[i];
+                idx++;
+            }
+        }
         
-        batches[nextBatchId].batchId = nextBatchId;
-        batches[nextBatchId].distributor = msg.sender;
-        batches[nextBatchId].productIds = productIds;
-        batches[nextBatchId].createdAt = block.timestamp;
-        batches[nextBatchId].isDistributedToRetailer = false;
-        
-        distributorBatches[msg.sender].push(nextBatchId);
-        emit BatchCreated(nextBatchId, msg.sender);
-        
-        return nextBatchId;
+        return result;
     }
 
-    // === RETAIL STAGE ===
-    function sendBatchToRetailer(uint256 batchId, address retailer, uint256[] calldata prices) external systemActive {
-        require(batches[batchId].distributor == msg.sender, "Not your batch");
-        require(!batches[batchId].isDistributedToRetailer, "Already sent");
-        require(roles[retailer] == AgriTraceLib.Role.RETAILER, "Retailer only");
-        require(batches[batchId].productIds.length == prices.length, "Price mismatch");
+    // Get batches by distributor
+    function getBatchesByDistributor(address distributor) external view returns (uint256[] memory) {
+        return distributorBatches[distributor];
+    }
+
+    // Get batches by retailer
+    function getBatchesByRetailer(address retailer) external view returns (uint256[] memory) {
+        return retailerBatches[retailer];
+    }
+
+    // === RETAIL STAGE - BUYER-INITIATED ===
+    function purchaseBatchFromDistributor(uint256 batchId, uint256[] calldata prices) external systemActive {
+        require(roles[msg.sender] == AgriTraceLib.Role.RETAILER, "Only retailer can buy");
+        require(!batches[batchId].isDistributedToRetailer, "Already purchased");
         
-        batches[batchId].retailer = retailer;
+        address distributor = batches[batchId].distributor;
+        uint256[] memory validProducts = this.getProductsInBatch(batchId);
+        
+        require(validProducts.length == prices.length, "Price mismatch with valid products");
+        require(validProducts.length > 0, "No valid products in batch");
+        
+        // Verify all valid products in batch are verified and available
+        for (uint256 i = 0; i < validProducts.length; i++) {
+            uint256 pid = validProducts[i];
+            require(products[pid].currentState == AgriTraceLib.ProductState.VERIFIED, "Product not verified");
+            require(products[pid].distributionData.distributor == distributor, "Invalid distributor");
+        }
+        
+        batches[batchId].retailer = msg.sender;
         batches[batchId].isDistributedToRetailer = true;
-        retailerBatches[retailer].push(batchId);
+        retailerBatches[msg.sender].push(batchId);
         
-        emit BatchSentToRetailer(batchId, retailer);
+        emit BatchPurchased(batchId, msg.sender);
         
-        for (uint256 i = 0; i < batches[batchId].productIds.length; i++) {
-            uint256 pid = batches[batchId].productIds[i];
+        for (uint256 i = 0; i < validProducts.length; i++) {
+            uint256 pid = validProducts[i];
             
             products[pid].currentStage = AgriTraceLib.Stage.RETAIL;
             products[pid].currentState = AgriTraceLib.ProductState.RECEIVED;
-            products[pid].retailData.retailer = retailer;
+            products[pid].retailData.retailer = msg.sender;
             products[pid].retailData.priceRetail = prices[i];
             products[pid].retailData.receivedAt = block.timestamp;
 
@@ -244,31 +347,33 @@ contract AgriTraceCore {
             products[pid].distributorToRetailerTxId = nextTxId;
             
             transactions[nextTxId].txId = nextTxId;
-            transactions[nextTxId].from = msg.sender;
-            transactions[nextTxId].to = retailer;
+            transactions[nextTxId].from = distributor;
+            transactions[nextTxId].to = msg.sender;
             transactions[nextTxId].productId = pid;
             transactions[nextTxId].batchId = batchId;
             transactions[nextTxId].price = prices[i];
             transactions[nextTxId].timestamp = block.timestamp;
             
-            retailerTxIds[retailer].push(nextTxId);
+            retailerTxIds[msg.sender].push(nextTxId);
             
-            emit ProductTransferred(pid, msg.sender, retailer);
+            emit ProductPurchased(pid, msg.sender, distributor);
             emit ProductStateChanged(pid, AgriTraceLib.ProductState.RECEIVED);
         }
     }
 
-    function storeRetailerQuality(
+    // Retailer quality assessment with ability to remove products
+    function storeRetailerQualityWithOracle(
         uint256 productId,
         uint256 score,
         string calldata damageLevel,
-        uint256 temperature,
         string calldata ipfsHash
     ) external systemActive {
         require(products[productId].retailData.retailer == msg.sender, "Only retailer");
         require(products[productId].currentStage == AgriTraceLib.Stage.RETAIL, "Must be RETAIL stage");
         require(score <= AgriTraceLib.MAX_SCORE, "Invalid score");
+        require(address(temperatureOracle) != address(0), "Temperature oracle not set");
         
+        uint256 temperature = temperatureOracle.getCurrentTemperature(productId);
         AgriTraceLib.Grade grade = _scoreToGrade(score);
         
         retailerQuality[productId].score = score;
@@ -296,6 +401,19 @@ contract AgriTraceCore {
         _updateReputation(productId, grade, AgriTraceLib.Stage.RETAIL);
     }
 
+    function requestTemperatureUpdate(uint256 productId) external systemActive returns (bytes32) {
+        require(address(temperatureOracle) != address(0), "Temperature oracle not set");
+        require(products[productId].isActive, "Product not active");
+        
+        require(
+            products[productId].distributionData.distributor == msg.sender || 
+            products[productId].retailData.retailer == msg.sender,
+            "Not authorized"
+        );
+        
+        return temperatureOracle.requestTemperatureForProduct(productId);
+    }
+
     function listProductForConsumer(uint256 productId) external systemActive {
         require(products[productId].retailData.retailer == msg.sender, "Only retailer");
         require(products[productId].currentState == AgriTraceLib.ProductState.VERIFIED, "Must be verified");
@@ -320,6 +438,106 @@ contract AgriTraceCore {
         
         emit ProductStateChanged(productId, products[productId].currentState);
         emit ProductBuyed(productId, consumer, buyQuantity);
+    }
+
+    // === HELPER FUNCTIONS FOR BUYERS ===
+    function getAvailableProductsForDistributor() external view returns (uint256[] memory) {
+        uint256 count;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].currentStage == AgriTraceLib.Stage.FARM && 
+                products[i].currentState == AgriTraceLib.ProductState.PENDING_PICKUP && 
+                products[i].isActive) {
+                count++;
+            }
+        }
+        
+        uint256[] memory result = new uint256[](count);
+        uint256 idx;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].currentStage == AgriTraceLib.Stage.FARM && 
+                products[i].currentState == AgriTraceLib.ProductState.PENDING_PICKUP && 
+                products[i].isActive) {
+                result[idx] = i;
+                idx++;
+            }
+        }
+        return result;
+    }
+
+    function getAvailableBatchesForRetailer() external view returns (uint256[] memory) {
+        uint256 count;
+        for (uint256 i = 1; i <= nextBatchId; i++) {
+            if (!batches[i].isDistributedToRetailer) {
+                uint256[] memory validProducts = this.getProductsInBatch(i);
+                if (validProducts.length > 0) {
+                    // Check if all valid products are verified
+                    bool allVerified = true;
+                    for (uint256 j = 0; j < validProducts.length; j++) {
+                        if (products[validProducts[j]].currentState != AgriTraceLib.ProductState.VERIFIED) {
+                            allVerified = false;
+                            break;
+                        }
+                    }
+                    if (allVerified) count++;
+                }
+            }
+        }
+        
+        uint256[] memory result = new uint256[](count);
+        uint256 idx;
+        for (uint256 i = 1; i <= nextBatchId; i++) {
+            if (!batches[i].isDistributedToRetailer) {
+                uint256[] memory validProducts = this.getProductsInBatch(i);
+                if (validProducts.length > 0) {
+                    bool allVerified = true;
+                    for (uint256 j = 0; j < validProducts.length; j++) {
+                        if (products[validProducts[j]].currentState != AgriTraceLib.ProductState.VERIFIED) {
+                            allVerified = false;
+                            break;
+                        }
+                    }
+                    if (allVerified) {
+                        result[idx] = i;
+                        idx++;
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    function getProductsByDistributor(address distributor) external view returns (uint256[] memory) {
+        uint256 count;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].distributionData.distributor == distributor && products[i].isActive) count++;
+        }
+        
+        uint256[] memory result = new uint256[](count);
+        uint256 idx;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].distributionData.distributor == distributor && products[i].isActive) {
+                result[idx] = i;
+                idx++;
+            }
+        }
+        return result;
+    }
+
+    function getProductsByRetailer(address retailer) external view returns (uint256[] memory) {
+        uint256 count;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].retailData.retailer == retailer && products[i].isActive) count++;
+        }
+        
+        uint256[] memory result = new uint256[](count);
+        uint256 idx;
+        for (uint256 i = 1; i <= nextProductId; i++) {
+            if (products[i].retailData.retailer == retailer && products[i].isActive) {
+                result[idx] = i;
+                idx++;
+            }
+        }
+        return result;
     }
 
     // === UTILITY FUNCTIONS ===
@@ -419,7 +637,6 @@ contract AgriTraceCore {
         _; 
     }
 
-    //fetch from ipfs
     function getUserDetails(address user) external view returns (
         AgriTraceLib.Role role,
         uint256 farmerReputation,
@@ -436,40 +653,25 @@ contract AgriTraceCore {
         );
     }
 
-    /**
- * @dev Get complete product trace with all data including IPFS hashes
- * This is the main function your frontend should call for tracing
- * Returns basic on-chain data + IPFS hashes to fetch complete struct data
- */
-function getFullTrace(uint256 productId) external view returns (
-    // Basic product info
-    uint256 id,
-    AgriTraceLib.Grade overallGrade,
-    
-    // IPFS hashes for complete struct data
-    string memory farmDataHash,           // IPFS hash for complete farm struct
-    string memory distributionDataHash,   // IPFS hash for complete distribution struct
-    string memory retailDataHash,         // IPFS hash for complete retail struct
-    
-    // Essential info
-    uint256 buyedQuantity
-) {
-    require(productId > 0 && productId <= nextProductId, "Product not found");
-    
-    AgriTraceLib.Product memory p = products[productId];
-    
-    return (
-        // Basic info
-        p.id,
-        p.overallGrade,
+    function getFullTrace(uint256 productId) external view returns (
+        uint256 id,
+        AgriTraceLib.Grade overallGrade,
+        string memory farmDataHash,
+        string memory distributionDataHash,
+        string memory retailDataHash,
+        uint256 buyedQuantity
+    ) {
+        require(productId > 0 && productId <= nextProductId, "Product not found");
         
-        // IPFS hashes - frontend will fetch complete struct data from these
-        p.farmDataHash,                   // Complete farm struct data in IPFS
-        p.distributionDataHash,           // Complete distribution struct data in IPFS
-        p.retailDataHash,                 // Complete retail struct data in IPFS
+        AgriTraceLib.Product memory p = products[productId];
         
-        // Essential info
-        p.retailData.buyedQuantity
-    );
-}
+        return (
+            p.id,
+            p.overallGrade,
+            p.farmDataHash,
+            p.distributionDataHash,
+            p.retailDataHash,
+            p.retailData.buyedQuantity
+        );
+    }
 }
