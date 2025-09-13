@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import "./AgriTraceLib.sol";
 import "./EmergencyManager.sol";
 import "./TemperatureOracle.sol";
+import "./DamageDetectionConsumer.sol";
 
 contract AgriTraceCore {
     using AgriTraceLib for *;
@@ -674,4 +675,187 @@ contract AgriTraceCore {
             p.retailData.buyedQuantity
         );
     }
-}
+
+    //ML INTEGRATION
+
+        // Add ML Oracle reference
+        DamageDetectionConsumer public damageDetectionOracle;
+        
+        // Track ML prediction requests
+        mapping(uint256 => bytes32) public productMLRequests; // productId => requestId
+        mapping(bytes32 => uint256) public mlRequestToProduct; // requestId => productId
+        
+        // Events for ML integration
+        event MLPredictionRequested(uint256 indexed productId, bytes32 indexed requestId, string imageUrl);
+        event MLPredictionReceived(uint256 indexed productId, uint256 damageScore, string prediction);
+        
+        // Set ML Oracle (admin only)
+        function setDamageDetectionOracle(address _damageOracle) external onlyAdmin {
+            damageDetectionOracle = DamageDetectionConsumer(_damageOracle);
+        }
+        
+        // Request ML prediction for a product
+        function requestMLDamagePrediction(uint256 productId, string calldata imageUrl) 
+            external 
+            systemActive 
+            returns (bytes32) 
+        {
+            require(products[productId].isActive, "Product not active");
+            require(
+                products[productId].distributionData.distributor == msg.sender || 
+                products[productId].retailData.retailer == msg.sender,
+                "Not authorized for this product"
+            );
+            require(address(damageDetectionOracle) != address(0), "ML Oracle not set");
+            
+            // Request prediction from ML oracle
+            bytes32 requestId = damageDetectionOracle.requestDamagePrediction(imageUrl);
+            
+            // Track the request
+            productMLRequests[productId] = requestId;
+            mlRequestToProduct[requestId] = productId;
+            
+            emit MLPredictionRequested(productId, requestId, imageUrl);
+            return requestId;
+        }
+        
+        // Enhanced quality assessment using ML prediction
+        function storeDistributorQualityWithML(
+            uint256 productId,
+            bytes32 mlRequestId,
+            string calldata damageLevel,
+            string calldata ipfsHash
+        ) external systemActive {
+            require(products[productId].distributionData.distributor == msg.sender, "Only distributor");
+            require(products[productId].currentStage == AgriTraceLib.Stage.DISTRIBUTION, "Must be DISTRIBUTION stage");
+            require(productMLRequests[productId] == mlRequestId, "Invalid ML request");
+            require(address(damageDetectionOracle) != address(0), "ML Oracle not set");
+            
+            // Get ML prediction result
+            (uint256 damageScore, string memory prediction, uint256 timestamp, bool fulfilled) = 
+                damageDetectionOracle.getPrediction(mlRequestId);
+            
+            require(fulfilled, "ML prediction not fulfilled yet");
+            require(timestamp > 0, "Invalid prediction");
+            
+            // Convert damage score to quality score (inverse relationship)
+            uint256 qualityScore = damageScore > 100 ? 0 : 100 - damageScore;
+            
+            // Get temperature as before
+            uint256 temperature = temperatureOracle.getCurrentTemperature(productId);
+            AgriTraceLib.Grade grade = _scoreToGrade(qualityScore);
+            
+            // Store quality data
+            distributorQuality[productId].score = qualityScore;
+            distributorQuality[productId].grade = grade;
+            distributorQuality[productId].damageLevel = damageLevel;
+            distributorQuality[productId].temperature = temperature;
+            distributorQuality[productId].timestamp = block.timestamp;
+            distributorQuality[productId].assessor = msg.sender;
+            
+            products[productId].distributionData.verifiedAt = block.timestamp;
+            products[productId].distributionDataHash = ipfsHash;
+            products[productId].overallGrade = grade;
+
+            // Handle rejection based on ML prediction
+            if (temperature < MIN_TEMP || grade == AgriTraceLib.Grade.REJECTED || damageScore > 75) {
+                productRemovedFromBatch[productId] = true;
+                products[productId].currentState = AgriTraceLib.ProductState.REJECTED;
+                emit ProductRemovedFromBatch(productId, productToBatch[productId], "ML detected high damage");
+                emit ProductRejected(productId, string(abi.encodePacked("ML damage score: ", _uint2str(damageScore))));
+            } else {
+                products[productId].currentState = AgriTraceLib.ProductState.VERIFIED;
+            }
+
+            emit DataStored(productId, ipfsHash, AgriTraceLib.Stage.DISTRIBUTION);
+            emit ProductStateChanged(productId, products[productId].currentState);
+            emit MLPredictionReceived(productId, damageScore, prediction);
+            
+            _updateReputation(productId, grade, AgriTraceLib.Stage.DISTRIBUTION);
+        }
+        
+        // Similar function for retailer
+        function storeRetailerQualityWithML(
+            uint256 productId,
+            bytes32 mlRequestId,
+            string calldata damageLevel,
+            string calldata ipfsHash
+        ) external systemActive {
+            require(products[productId].retailData.retailer == msg.sender, "Only retailer");
+            require(products[productId].currentStage == AgriTraceLib.Stage.RETAIL, "Must be RETAIL stage");
+            require(productMLRequests[productId] == mlRequestId, "Invalid ML request");
+            require(address(damageDetectionOracle) != address(0), "ML Oracle not set");
+            
+            // Get ML prediction result
+            (uint256 damageScore, string memory prediction, uint256 timestamp, bool fulfilled) = 
+                damageDetectionOracle.getPrediction(mlRequestId);
+            
+            require(fulfilled, "ML prediction not fulfilled yet");
+            require(timestamp > 0, "Invalid prediction");
+            
+            // Convert damage score to quality score
+            uint256 qualityScore = damageScore > 100 ? 0 : 100 - damageScore;
+            
+            uint256 temperature = temperatureOracle.getCurrentTemperature(productId);
+            AgriTraceLib.Grade grade = _scoreToGrade(qualityScore);
+            
+            retailerQuality[productId].score = qualityScore;
+            retailerQuality[productId].grade = grade;
+            retailerQuality[productId].damageLevel = damageLevel;
+            retailerQuality[productId].temperature = temperature;
+            retailerQuality[productId].timestamp = block.timestamp;
+            retailerQuality[productId].assessor = msg.sender;
+            
+            products[productId].retailData.verifiedAt = block.timestamp;
+            products[productId].retailDataHash = ipfsHash;
+            products[productId].overallGrade = grade;
+
+            if (temperature < MIN_TEMP || grade == AgriTraceLib.Grade.REJECTED || damageScore > 75) {
+                products[productId].isActive = false;
+                products[productId].currentState = AgriTraceLib.ProductState.REJECTED;
+                emit ProductRejected(productId, string(abi.encodePacked("ML damage score: ", _uint2str(damageScore))));
+            } else {
+                products[productId].currentState = AgriTraceLib.ProductState.VERIFIED;
+            }
+
+            emit DataStored(productId, ipfsHash, AgriTraceLib.Stage.RETAIL);
+            emit ProductStateChanged(productId, products[productId].currentState);
+            emit MLPredictionReceived(productId, damageScore, prediction);
+            
+            _updateReputation(productId, grade, AgriTraceLib.Stage.RETAIL);
+        }
+        
+        // Get ML prediction status for a product
+        function getMLPredictionStatus(uint256 productId) 
+            external 
+            view 
+            returns (
+                bytes32 requestId,
+                uint256 damageScore,
+                string memory prediction,
+                bool fulfilled
+            ) 
+        {
+            bytes32 reqId = productMLRequests[productId];
+            if (reqId == bytes32(0)) {
+                return (bytes32(0), 0, "", false);
+            }
+            
+            (uint256 score, string memory pred, uint256 timestamp, bool isFulfilled) = 
+                damageDetectionOracle.getPrediction(reqId);
+            
+            return (reqId, score, pred, isFulfilled);
+        }
+        
+        // Utility function to convert uint to string
+        function _uint2str(uint256 _i) internal pure returns (string memory) {
+            if (_i == 0) return "0";
+            uint256 j = _i;
+            uint256 len;
+            while (j != 0) { len++; j /= 10; }
+            bytes memory bstr = new bytes(len);
+            uint256 k = len;
+            while (_i != 0) { k = k-1; bstr[k] = bytes1(uint8(48 + _i % 10)); _i /= 10; }
+            return string(bstr);
+        }
+    }

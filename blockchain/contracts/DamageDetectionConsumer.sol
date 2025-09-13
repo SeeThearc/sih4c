@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.7;
 
-import "@chainlink/contracts/src/v0.8/ChainlinkClient.sol";
-import "@chainlink/contracts/src/v0.8/ConfirmedOwner.sol";
+import "@chainlink/contracts/src/v0.8/operatorforwarder/ChainlinkClient.sol";
+import "@chainlink/contracts/src/v0.8/shared/access/ConfirmedOwner.sol";
 
 contract DamageDetectionConsumer is ChainlinkClient, ConfirmedOwner {
     using Chainlink for Chainlink.Request;
@@ -36,19 +36,19 @@ contract DamageDetectionConsumer is ChainlinkClient, ConfirmedOwner {
     );
 
     constructor() ConfirmedOwner(msg.sender) {
-        setChainlinkToken(0x779877A7B0D9E8603169DdbD7836e478b4624789); // Sepolia LINK
-        setChainlinkOracle(0x6090149792dAAeE9D1D568c9f9a6F6B46AA29eFD); // Sepolia Oracle
+        _setChainlinkToken(0x779877A7B0D9E8603169DdbD7836e478b4624789); // Sepolia LINK
+        _setChainlinkOracle(0x6090149792dAAeE9D1D568c9f9a6F6B46AA29eFD); // Sepolia Oracle
         
-        // Job ID for GET request (pre-defined by Chainlink)
-        jobId = "7d80a6386ef543a3abb52817f6707e3b"; // GET > uint256 job
-        fee = (1 * LINK_DIVISIBILITY) / 10; // 0.1 * 10**18 (0.1 LINK)
+        // Job ID for GET request - updated for new Chainlink
+        jobId = "ca98366cc7314957b8c012c72f05aeeb"; // Updated GET > uint256 job
+        fee = (1 * LINK_DIVISIBILITY) / 10; // 0.1 LINK
     }
     
     function requestDamagePrediction(string memory imageUrl) 
         public 
         returns (bytes32 requestId) 
     {
-        Chainlink.Request memory req = buildChainlinkRequest(
+        Chainlink.Request memory req = _buildChainlinkRequest(
             jobId,
             address(this),
             this.fulfill.selector
@@ -61,11 +61,15 @@ contract DamageDetectionConsumer is ChainlinkClient, ConfirmedOwner {
             imageUrl
         ));
         
-        req.add("get", fullUrl);
-        req.add("path", "damage_score"); // Extract damage_score from JSON response
+        // NEW SYNTAX: Use _add instead of add
+        req._add("get", fullUrl);
+        req._add("path", "damage_score"); // Extract damage_score from JSON response
+        
+        // Optional: Add headers if your API requires them
+        // req._add("headers", "Content-Type: application/json");
         
         // Send the request
-        requestId = sendChainlinkRequest(req, fee);
+        requestId = _sendChainlinkRequest(req, fee);
         
         // Store requester
         requesters[requestId] = msg.sender;
@@ -115,7 +119,7 @@ contract DamageDetectionConsumer is ChainlinkClient, ConfirmedOwner {
     }
     
     function withdrawLink() public onlyOwner {
-        LinkTokenInterface link = LinkTokenInterface(chainlinkTokenAddress());
+        LinkTokenInterface link = LinkTokenInterface(_chainlinkTokenAddress());
         require(
             link.transfer(msg.sender, link.balanceOf(address(this))),
             "Unable to transfer"
@@ -124,5 +128,25 @@ contract DamageDetectionConsumer is ChainlinkClient, ConfirmedOwner {
     
     function updateApiEndpoint(string memory newEndpoint) public onlyOwner {
         apiEndpoint = newEndpoint;
+    }
+    
+    // Additional utility functions for better integration
+    function getRequestStatus(bytes32 requestId) 
+        public 
+        view 
+        returns (bool exists, bool fulfilled) 
+    {
+        return (
+            requesters[requestId] != address(0),
+            predictions[requestId].fulfilled
+        );
+    }
+    
+    function getRequester(bytes32 requestId) 
+        public 
+        view 
+        returns (address) 
+    {
+        return requesters[requestId];
     }
 }
