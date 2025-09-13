@@ -3,7 +3,6 @@ pragma solidity ^0.8.19;
 
 import "@chainlink/contracts/src/v0.8/operatorforwarder/ChainlinkClient.sol";
 import "@chainlink/contracts/src/v0.8/shared/access/ConfirmedOwner.sol";
-import "./AgriTraceCore.sol";
 
 contract TemperatureOracle is ChainlinkClient, ConfirmedOwner {
     using Chainlink for Chainlink.Request;
@@ -11,9 +10,7 @@ contract TemperatureOracle is ChainlinkClient, ConfirmedOwner {
     uint256 private constant ORACLE_PAYMENT = 1 * LINK_DIVISIBILITY; // 1 * 10**18
     bytes32 private jobId;
     uint256 private fee;
-    
-    AgriTraceCore public agriTraceCore;
-    
+
     // Events
     event RequestTemperature(bytes32 indexed requestId, uint256 productId);
     event TemperatureReceived(bytes32 indexed requestId, uint256 temperature, uint256 productId);
@@ -24,12 +21,11 @@ contract TemperatureOracle is ChainlinkClient, ConfirmedOwner {
     mapping(bytes32 => address) public requestToRequester;
     mapping(uint256 => uint256) public latestTemperatureByProduct;
 
-    constructor(address _agriTraceCore) ConfirmedOwner(msg.sender) {
+    constructor() ConfirmedOwner(msg.sender) {
         _setChainlinkToken(0x779877A7B0D9E8603169DdbD7836e478b4624789); // Sepolia LINK token
         _setChainlinkOracle(0x6090149792dAAeE9D1D568c9f9a6F6B46AA29eFD); // Sepolia Oracle
         jobId = "ca98366cc7314957b8c012c72f05aeeb"; // HTTP GET job ID for Sepolia
         fee = 0.1 * 10 ** 18; // 0.1 LINK
-        agriTraceCore = AgriTraceCore(_agriTraceCore);
     }
 
     /**
@@ -70,13 +66,6 @@ contract TemperatureOracle is ChainlinkClient, ConfirmedOwner {
         
         // Store latest temperature for this product
         latestTemperatureByProduct[productId] = actualTemp;
-        
-        // Check for critical temperature
-        if (actualTemp < agriTraceCore.MIN_TEMP()) {
-            emit CriticalTemperatureDetected(productId, actualTemp);
-        }
-        
-        emit TemperatureReceived(_requestId, actualTemp, productId);
         
         // Clean up mappings
         delete requestToProductId[_requestId];
