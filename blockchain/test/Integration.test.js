@@ -2,328 +2,402 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
-describe("AgriTrace Integration Tests", function () {
-    let agriTraceCore, emergencyManager, qualityOracle;
-    let admin, farmer, distributor, retailer, consumer;
+describe("AgriTrace System Integration Tests", function () {
+  let agriTraceCore, temperatureOracle, damageDetectionConsumer;
+  let admin, farmer, distributor, retailer, consumer;
 
-    beforeEach(async function () {
-        [admin, farmer, distributor, retailer, consumer] = await ethers.getSigners();
+  beforeEach(async function () {
+    [admin, farmer, distributor, retailer, consumer] =
+      await ethers.getSigners();
 
-        // Deploy contracts
-        const AgriTraceCore = await ethers.getContractFactory("AgriTraceCore");
-        agriTraceCore = await AgriTraceCore.deploy();
-        await agriTraceCore.waitForDeployment();
+    // Deploy all contracts
+    const AgriTraceCore = await ethers.getContractFactory("AgriTraceCore");
+    agriTraceCore = await AgriTraceCore.deploy();
+    await agriTraceCore.waitForDeployment();
 
-        const emergencyAddress = await agriTraceCore.emergency();
-        emergencyManager = await ethers.getContractAt("EmergencyManager", emergencyAddress);
+    const TemperatureOracle = await ethers.getContractFactory(
+      "TemperatureOracle"
+    );
+    temperatureOracle = await TemperatureOracle.deploy();
+    await temperatureOracle.waitForDeployment();
 
-        const QualityOracle = await ethers.getContractFactory("QualityOracle");
-        qualityOracle = await QualityOracle.deploy();
-        await qualityOracle.waitForDeployment();
+    const DamageDetectionConsumer = await ethers.getContractFactory(
+      "DamageDetectionConsumer"
+    );
+    damageDetectionConsumer = await DamageDetectionConsumer.deploy();
+    await damageDetectionConsumer.waitForDeployment();
 
-        // Setup roles
-        await agriTraceCore.assignRole(farmer.address, 1);
-        await agriTraceCore.assignRole(distributor.address, 2);
-        await agriTraceCore.assignRole(retailer.address, 3);
+    // Setup
+    await agriTraceCore.setTemperatureOracle(
+      await temperatureOracle.getAddress()
+    );
+    await agriTraceCore.setDamageDetectionOracle(
+      await damageDetectionConsumer.getAddress()
+    );
+    await agriTraceCore.assignRole(farmer.address, 1);
+    await agriTraceCore.assignRole(distributor.address, 2);
+    await agriTraceCore.assignRole(retailer.address, 3);
+  });
+
+  describe("Complete Product Lifecycle", function () {
+    it("Should handle full product journey from farm to consumer", async function () {
+      const futureTime = (await time.latest()) + 86400;
+
+      // 1. Farmer creates product
+      await expect(
+        agriTraceCore
+          .connect(farmer)
+          .createProduct(
+            "Organic Tomatoes",
+            futureTime,
+            "Green Valley Farm",
+            100,
+            50
+          )
+      ).to.emit(agriTraceCore, "ProductCreated");
+
+      const productId = 1;
+
+      // 2. Store farm data
+      await agriTraceCore
+        .connect(farmer)
+        .storeFarmDataHash(productId, "QmFarmHash123");
+
+      // 3. Distributor purchases
+      await agriTraceCore
+        .connect(distributor)
+        .purchaseFromFarmer(productId, 150);
+
+      // 4. Create batch
+      await agriTraceCore.connect(distributor).createBatch([productId]);
+      const batchId = 1;
+
+      // 5. Request temperature check
+      await agriTraceCore
+        .connect(distributor)
+        .requestTemperatureUpdate(productId);
+
+      // 6. Quality assessment
+      await agriTraceCore
+        .connect(distributor)
+        .storeDistributorQualityWithOracle(
+          productId,
+          85,
+          "minimal damage",
+          "QmDistHash123"
+        );
+
+      // 7. Retailer purchases batch
+      await agriTraceCore
+        .connect(retailer)
+        .purchaseBatchFromDistributor(batchId, [200]);
+
+      // 8. Retailer quality assessment
+      await agriTraceCore
+        .connect(retailer)
+        .storeRetailerQualityWithOracle(
+          productId,
+          80,
+          "good condition",
+          "QmRetailHash123"
+        );
+
+      // 9. List for consumer
+      await agriTraceCore.connect(retailer).listProductForConsumer(productId);
+
+      // 10. Consumer purchase
+      await agriTraceCore
+        .connect(retailer)
+        .markProductAsBuyed(productId, consumer.address, 25);
+
+      // Verify final state
+      const product = await agriTraceCore.getProduct(productId);
+      expect(product.currentStage).to.equal(2); // RETAIL
+      expect(product.retailData.consumer).to.equal(consumer.address);
+      expect(product.retailData.buyedQuantity).to.equal(25);
+
+      // Verify traceability
+      const trace = await agriTraceCore.getFullTrace(productId);
+      expect(trace.farmDataHash).to.equal("QmFarmHash123");
+      expect(trace.distributionDataHash).to.equal("QmDistHash123");
+      expect(trace.retailDataHash).to.equal("QmRetailHash123");
     });
 
-    describe("Complete Product Journey", function () {
-        it("Should handle complete product lifecycle", async function () {
-            // Step 1: Farmer creates product
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            await expect(
-                agriTraceCore.connect(farmer).createProduct(
-                    "Organic Apples",
-                    expiresAt,
-                    "Green Valley Farm",
-                    ethers.parseEther("0.05"),
-                    200
-                )
-            ).to.emit(agriTraceCore, "ProductCreated");
+    it("Should handle product rejection during quality assessment", async function () {
+      const futureTime = (await time.latest()) + 86400;
 
-            const productId = 1;
+      // Setup product
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Apples", futureTime, "Farm B", 100, 30);
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(1, 120);
+      await agriTraceCore.connect(distributor).createBatch([1]);
 
-            // Step 2: Store farm data
-            await agriTraceCore.connect(farmer).storeFarmDataHash(productId, "QmFarmData123");
+      // Simulate poor quality (low score = Grade REJECTED)
+      await expect(
+        agriTraceCore
+          .connect(distributor)
+          .storeDistributorQualityWithOracle(
+            1,
+            30,
+            "severe damage",
+            "QmPoorQuality"
+          )
+      ).to.emit(agriTraceCore, "ProductRejected");
 
-            // Step 3: Transfer to distributor
-            await agriTraceCore.connect(farmer).transferToDistributor(
-                productId,
-                distributor.address,
-                ethers.parseEther("0.08")
-            );
-
-            // Step 4: Distributor quality check
-            await agriTraceCore.connect(distributor).storeDistributorQuality(
-                productId,
-                88,
-                "Minimal",
-                15,
-                "QmDistributorData123"
-            );
-
-            // Step 5: Create batch
-            await agriTraceCore.connect(distributor).createBatch([productId]);
-            const batchId = 1;
-
-            // Step 6: Send to retailer
-            await agriTraceCore.connect(distributor).sendBatchToRetailer(
-                batchId,
-                retailer.address,
-                [ethers.parseEther("0.12")]
-            );
-
-            // Step 7: Retailer quality check
-            await agriTraceCore.connect(retailer).storeRetailerQuality(
-                productId,
-                85,
-                "Good",
-                12,
-                "QmRetailerData123"
-            );
-
-            // Step 8: List for consumers
-            await agriTraceCore.connect(retailer).listProductForConsumer(productId);
-
-            // Step 9: Consumer purchase
-            await agriTraceCore.connect(retailer).markProductAsBuyed(
-                productId,
-                consumer.address,
-                100
-            );
-
-            // Verify final state
-            const product = await agriTraceCore.getProduct(productId);
-            expect(product.currentStage).to.equal(2); // RETAIL
-            expect(product.retailData.buyedQuantity).to.equal(100);
-            expect(product.retailData.consumer).to.equal(consumer.address);
-
-            // Verify trace
-            const trace = await agriTraceCore.getFullTrace(productId);
-            expect(trace[0]).to.equal(productId);
-            expect(trace[2]).to.equal("QmFarmData123");
-            expect(trace[3]).to.equal("QmDistributorData123");
-            expect(trace[4]).to.equal("QmRetailerData123");
-        });
-
-        it("Should handle multiple products in a batch", async function () {
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            const productIds = [];
-
-            // Create multiple products
-            for (let i = 0; i < 3; i++) {
-                await agriTraceCore.connect(farmer).createProduct(
-                    `Product ${i + 1}`,
-                    expiresAt,
-                    "Test Farm",
-                    ethers.parseEther("0.1"),
-                    50
-                );
-                productIds.push(i + 1);
-
-                // Transfer to distributor
-                await agriTraceCore.connect(farmer).transferToDistributor(
-                    i + 1,
-                    distributor.address,
-                    ethers.parseEther("0.15")
-                );
-
-                // Quality check
-                await agriTraceCore.connect(distributor).storeDistributorQuality(
-                    i + 1,
-                    85,
-                    "Good",
-                    18,
-                    `QmHash${i + 1}`
-                );
-            }
-
-            // Create batch with all products
-            await agriTraceCore.connect(distributor).createBatch(productIds);
-
-            // Send to retailer
-            const prices = [
-                ethers.parseEther("0.2"),
-                ethers.parseEther("0.2"),
-                ethers.parseEther("0.2")
-            ];
-            await agriTraceCore.connect(distributor).sendBatchToRetailer(1, retailer.address, prices);
-
-            // Verify all products are at retailer
-            for (let i = 0; i < 3; i++) {
-                const product = await agriTraceCore.getProduct(i + 1);
-                expect(product.currentStage).to.equal(2); // RETAIL
-                expect(product.retailData.retailer).to.equal(retailer.address);
-            }
-        });
-
-        it("Should handle product rejection scenarios", async function () {
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            await agriTraceCore.connect(farmer).createProduct(
-                "Test Product",
-                expiresAt,
-                "Test Farm",
-                ethers.parseEther("0.1"),
-                100
-            );
-
-            await agriTraceCore.connect(farmer).transferToDistributor(
-                1,
-                distributor.address,
-                ethers.parseEther("0.15")
-            );
-
-            // Reject due to low temperature
-            await expect(
-                agriTraceCore.connect(distributor).storeDistributorQuality(
-                    1,
-                    85,
-                    "Good",
-                    3, // Below MIN_TEMP
-                    "QmHash"
-                )
-            ).to.emit(agriTraceCore, "ProductRejected");
-
-            const product = await agriTraceCore.getProduct(1);
-            expect(product.currentState).to.equal(3); // REJECTED
-            expect(product.isActive).to.equal(false);
-        });
+      const product = await agriTraceCore.getProduct(1);
+      expect(product.currentState).to.equal(3); // REJECTED
     });
 
-    describe("Reputation System Integration", function () {
-        it("Should update reputation scores throughout the journey", async function () {
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            
-            // Initial reputation scores
-            const initialFarmerRep = await agriTraceCore.reputationScores(1, farmer.address);
-            const initialDistributorRep = await agriTraceCore.reputationScores(2, distributor.address);
-            const initialRetailerRep = await agriTraceCore.reputationScores(3, retailer.address);
+    it("Should handle batch with mixed quality products", async function () {
+      const futureTime = (await time.latest()) + 86400;
 
-            // Create and process high-quality product
-            await agriTraceCore.connect(farmer).createProduct(
-                "Premium Product",
-                expiresAt,
-                "Premium Farm",
-                ethers.parseEther("0.2"),
-                50
-            );
+      // Create multiple products
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Product1", futureTime, "Farm", 100, 10);
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Product2", futureTime, "Farm", 100, 10);
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Product3", futureTime, "Farm", 100, 10);
 
-            await agriTraceCore.connect(farmer).transferToDistributor(
-                1,
-                distributor.address,
-                ethers.parseEther("0.3")
-            );
+      // Distributor purchases all
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150);
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(2, 150);
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(3, 150);
 
-            // High quality score at distributor
-            await agriTraceCore.connect(distributor).storeDistributorQuality(
-                1,
-                95, // Grade A
-                "Excellent",
-                20,
-                "QmDistHash"
-            );
+      // Create batch
+      await agriTraceCore.connect(distributor).createBatch([1, 2, 3]);
 
-            await agriTraceCore.connect(distributor).createBatch([1]);
-            await agriTraceCore.connect(distributor).sendBatchToRetailer(
-                1,
-                retailer.address,
-                [ethers.parseEther("0.4")]
-            );
+      // Quality assessment - mixed results
+      await agriTraceCore
+        .connect(distributor)
+        .storeDistributorQualityWithOracle(1, 85, "good", "QmGood1"); // Pass
 
-            // High quality score at retailer
-            await agriTraceCore.connect(retailer).storeRetailerQuality(
-                1,
-                90, // Grade A
-                "Excellent",
-                18,
-                "QmRetailHash"
-            );
+      await agriTraceCore
+        .connect(distributor)
+        .storeDistributorQualityWithOracle(2, 30, "poor", "QmPoor2"); // Fail - should be removed from batch
 
-            // Check reputation improvements
-            const newFarmerRep = await agriTraceCore.reputationScores(1, farmer.address);
-            const newDistributorRep = await agriTraceCore.reputationScores(2, distributor.address);
-            const newRetailerRep = await agriTraceCore.reputationScores(3, retailer.address);
+      await agriTraceCore
+        .connect(distributor)
+        .storeDistributorQualityWithOracle(3, 75, "acceptable", "QmOk3"); // Pass
 
-            expect(newFarmerRep).to.be.gt(initialFarmerRep);
-            expect(newDistributorRep).to.be.gt(initialDistributorRep);
-            expect(newRetailerRep).to.be.gt(initialRetailerRep);
-        });
+      // Check batch contents - should only have 2 valid products
+      const validProducts = await agriTraceCore.getProductsInBatch(1);
+      expect(validProducts.length).to.equal(2);
+
+      // Verify retailer can purchase batch with valid products
+      await agriTraceCore
+        .connect(retailer)
+        .purchaseBatchFromDistributor(1, [200, 200]);
+    });
+  });
+
+  describe("ML Integration Workflow", function () {
+    it("Should handle ML prediction request flow", async function () {
+      const futureTime = (await time.latest()) + 86400;
+
+      // Setup
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("ML Test Product", futureTime, "Farm", 100, 20);
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150);
+      await agriTraceCore.connect(distributor).createBatch([1]);
+
+      // Request ML prediction
+      const imageUrl = "https://example.com/test-tomato.jpg";
+      await expect(
+        agriTraceCore
+          .connect(distributor)
+          .requestMLDamagePrediction(1, imageUrl)
+      ).to.emit(agriTraceCore, "MLPredictionRequested");
+
+      // Check prediction status
+      const status = await agriTraceCore.getMLPredictionStatus(1);
+      expect(status.requestId).to.not.equal(ethers.ZeroHash);
+      expect(status.fulfilled).to.be.false;
+
+      // Note: In real test, you'd mock the Chainlink response here
+      // For now, we verify the request was made
     });
 
-    describe("Emergency Controls Integration", function () {
-        it("Should prevent operations when system is paused", async function () {
-            await emergencyManager.pause();
+    it("Should prevent unauthorized ML requests", async function () {
+      const futureTime = (await time.latest()) + 86400;
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Test", futureTime, "Farm", 100, 20);
 
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            await expect(
-                agriTraceCore.connect(farmer).createProduct(
-                    "Test Product",
-                    expiresAt,
-                    "Test Farm",
-                    ethers.parseEther("0.1"),
-                    100
-                )
-            ).to.be.revertedWith("System paused");
-        });
+      await expect(
+        agriTraceCore
+          .connect(retailer)
+          .requestMLDamagePrediction(1, "https://example.com/image.jpg")
+      ).to.be.revertedWith("Not authorized for this product");
+    });
+  });
 
-        it("Should prevent blacklisted users from operating", async function () {
-            await emergencyManager.blacklist(farmer.address);
+  describe("Oracle Integration", function () {
+    it("Should handle temperature oracle requests", async function () {
+      const futureTime = (await time.latest()) + 86400;
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Temperature Test", futureTime, "Farm", 100, 15);
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150);
 
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            await expect(
-                agriTraceCore.connect(farmer).createProduct(
-                    "Test Product",
-                    expiresAt,
-                    "Test Farm",
-                    ethers.parseEther("0.1"),
-                    100
-                )
-            ).to.be.revertedWith("User blacklisted");
-        });
+      await expect(
+        agriTraceCore.connect(distributor).requestTemperatureUpdate(1)
+      ).to.not.be.reverted;
     });
 
-    describe("Gas Optimization Tests", function () {
-        it("Should handle batch operations efficiently", async function () {
-            const expiresAt = (await time.latest()) + 86400 * 30;
-            const batchSize = 10;
-            const productIds = [];
+    it("Should validate oracle settings", async function () {
+      // Reset oracle
+      await agriTraceCore
+        .connect(admin)
+        .setTemperatureOracle(ethers.ZeroAddress);
 
-            // Create multiple products
-            for (let i = 0; i < batchSize; i++) {
-                await agriTraceCore.connect(farmer).createProduct(
-                    `Batch Product ${i}`,
-                    expiresAt,
-                    "Batch Farm",
-                    ethers.parseEther("0.1"),
-                    100
-                );
-                
-                await agriTraceCore.connect(farmer).transferToDistributor(
-                    i + 1,
-                    distributor.address,
-                    ethers.parseEther("0.15")
-                );
+      const futureTime = (await time.latest()) + 86400;
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("No Oracle Test", futureTime, "Farm", 100, 15);
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150);
+      await agriTraceCore.connect(distributor).createBatch([1]);
 
-                await agriTraceCore.connect(distributor).storeDistributorQuality(
-                    i + 1,
-                    85,
-                    "Good",
-                    15,
-                    `QmHash${i}`
-                );
-
-                productIds.push(i + 1);
-            }
-
-            // Create batch - should handle multiple products efficiently
-            const tx = await agriTraceCore.connect(distributor).createBatch(productIds);
-            const receipt = await tx.wait();
-            
-            console.log(`Gas used for batch of ${batchSize} products:`, receipt.gasUsed.toString());
-            
-            // Verify batch creation
-            const batch = await agriTraceCore.getBatchDetails(1);
-            expect(batch.productIds.length).to.equal(batchSize);
-        });
+      await expect(
+        agriTraceCore
+          .connect(distributor)
+          .storeDistributorQualityWithOracle(1, 85, "good", "QmHash")
+      ).to.be.revertedWith("Temperature oracle not set");
     });
+  });
+
+  describe("Emergency Scenarios", function () {
+    it("Should handle system pause during operations", async function () {
+      const futureTime = (await time.latest()) + 86400;
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Emergency Test", futureTime, "Farm", 100, 15);
+
+      // Get emergency manager and pause system
+      const emergencyManager = await agriTraceCore.emergency();
+      const EmergencyManager = await ethers.getContractFactory(
+        "EmergencyManager"
+      );
+      const emergencyContract = EmergencyManager.attach(emergencyManager);
+
+      await emergencyContract.connect(admin).pause();
+
+      // Should prevent new operations
+      await expect(
+        agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150)
+      ).to.be.revertedWith("System paused");
+
+      // Resume and continue
+      await emergencyContract.connect(admin).unpause();
+
+      await expect(
+        agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150)
+      ).to.not.be.reverted;
+    });
+
+    it("Should handle user blacklisting", async function () {
+      const emergencyManager = await agriTraceCore.emergency();
+      const EmergencyManager = await ethers.getContractFactory(
+        "EmergencyManager"
+      );
+      const emergencyContract = EmergencyManager.attach(emergencyManager);
+
+      await emergencyContract.connect(admin).blacklist(farmer.address);
+
+      const futureTime = (await time.latest()) + 86400;
+      await expect(
+        agriTraceCore
+          .connect(farmer)
+          .createProduct("Blacklisted Test", futureTime, "Farm", 100, 15)
+      ).to.be.revertedWith("User blacklisted");
+    });
+  });
+
+  describe("Data Consistency & Edge Cases", function () {
+    it("Should maintain data consistency across stages", async function () {
+      const futureTime = (await time.latest()) + 86400;
+      await agriTraceCore
+        .connect(farmer)
+        .createProduct("Consistency Test", futureTime, "Farm", 100, 25);
+
+      // Verify initial state
+      let product = await agriTraceCore.getProduct(1);
+      expect(product.farmData.quantity).to.equal(25);
+      expect(product.isActive).to.be.true;
+
+      // Move through stages and verify consistency
+      await agriTraceCore.connect(distributor).purchaseFromFarmer(1, 150);
+      product = await agriTraceCore.getProduct(1);
+      expect(product.currentStage).to.equal(1); // DISTRIBUTION
+      expect(product.distributionData.distributor).to.equal(
+        distributor.address
+      );
+
+      await agriTraceCore.connect(distributor).createBatch([1]);
+      product = await agriTraceCore.getProduct(1);
+      expect(product.currentState).to.equal(1); // RECEIVED
+
+      // Verify transaction records
+      const tx = await agriTraceCore.getTransaction(
+        product.farmerToDistributorTxId
+      );
+      expect(tx.from).to.equal(farmer.address);
+      expect(tx.to).to.equal(distributor.address);
+      expect(tx.productId).to.equal(1);
+    });
+
+    it("Should handle zero quantities correctly", async function () {
+      const futureTime = (await time.latest()) + 86400;
+
+      await expect(
+        agriTraceCore
+          .connect(farmer)
+          .createProduct("Zero Quantity", futureTime, "Farm", 100, 0)
+      ).to.be.revertedWith("Invalid params");
+    });
+
+    it("Should handle expired products", async function () {
+      const pastTime = (await time.latest()) - 86400;
+
+      await expect(
+        agriTraceCore
+          .connect(farmer)
+          .createProduct("Expired", pastTime, "Farm", 100, 10)
+      ).to.be.revertedWith("Invalid params");
+    });
+  });
+
+  describe("Performance & Gas Optimization", function () {
+    it("Should handle large batches efficiently", async function () {
+      const futureTime = (await time.latest()) + 86400;
+      const productIds = [];
+
+      // Create 10 products
+      for (let i = 0; i < 10; i++) {
+        await agriTraceCore
+          .connect(farmer)
+          .createProduct(`Product${i}`, futureTime, "Farm", 100, 10);
+        productIds.push(i + 1);
+        await agriTraceCore.connect(distributor).purchaseFromFarmer(i + 1, 150);
+      }
+
+      // Create large batch
+      const tx = await agriTraceCore
+        .connect(distributor)
+        .createBatch(productIds);
+      const receipt = await tx.wait();
+
+      // Verify gas usage is reasonable (adjust limit as needed)
+      expect(receipt.gasUsed).to.be.below(5000000);
+
+      // Verify batch creation
+      const batch = await agriTraceCore.getBatchDetails(1);
+      expect(batch.productIds.length).to.equal(10);
+    });
+  });
 });

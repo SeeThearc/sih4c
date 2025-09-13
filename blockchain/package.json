@@ -4,7 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npx hardhat test",
+    "test:core": "npx hardhat test test/AgriTraceCore.test.js",
+    "test:oracle": "npx hardhat test test/TemperatureOracle.test.js",
+    "test:ml": "npx hardhat test test/DamageDetectionConsumer.test.js",
+    "test:emergency": "npx hardhat test test/EmergencyManager.test.js",
+    "test:integration": "npx hardhat test test/Integration.test.js",
+    "test:coverage": "npx hardhat coverage",
+    "test:gas": "REPORT_GAS=true npx hardhat test",
+    "compile": "npx hardhat compile"
   },
   "keywords": [],
   "author": "",
@@ -28,6 +36,7 @@
     "typechain": "^8.3.2"
   },
   "dependencies": {
-    "@chainlink/contracts": "^1.4.0"
+    "@chainlink/contracts": "^1.4.0",
+    "axios": "^1.12.1"
   }
 }
