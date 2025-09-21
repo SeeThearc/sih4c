@@ -1,0 +1,3 @@
+[submodule "VeriCrop-Frontend"]
+    path = VeriCrop-Frontend
+    url = https://github.com/abeer555/VeriCrop-Frontend
