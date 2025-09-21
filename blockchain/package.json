@@ -1,25 +1,36 @@
 {
-  "name": "agritrace-testing",
+  "name": "agritrace-blockchain",
   "version": "1.0.0",
-  "description": "Comprehensive testing suite for AgriTrace blockchain system",
+  "description": "AgriTrace Blockchain Supply Chain System - SIH 2025",
+  "author": "PratTandon",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PratTandon/SIH-BlockChain-2025"
+  },
   "scripts": {
-    "test": "npx hardhat test",
-    "test:core": "npx hardhat test test/AgriTrace.test.js",
-    "test:oracles": "npx hardhat test test/AgriTraceOracles.test.js",
-    "test:roles": "npx hardhat test test/AgriTraceRoles.test.js",
-    "test:stress": "npx hardhat test test/AgriTraceStressTest.test.js",
-    "coverage": "npx hardhat coverage",
     "compile": "npx hardhat compile",
-    "clean": "npx hardhat clean"
+    "test": "npx hardhat test",
+    "coverage": "npx hardhat coverage",
+    "deploy:local": "npx hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "npx hardhat run scripts/deploy.js --network sepolia",
+    "deploy:polygon": "npx hardhat run scripts/deploy.js --network polygon",
+    "deploy:mainnet": "npx hardhat run scripts/deploy.js --network mainnet",
+    "verify:sepolia": "npx hardhat run scripts/verify-contracts.js --network sepolia",
+    "verify:polygon": "npx hardhat run scripts/verify-contracts.js --network polygon",
+    "verify:mainnet": "npx hardhat run scripts/verify-contracts.js --network mainnet"
   },
   "devDependencies": {
-    "@chainlink/contracts": "^0.8.0",
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@chainlink/contracts": "^0.8.0",
+    "hardhat": "^2.19.0",
     "chai": "^4.3.10",
-    "ethers": "^6.8.0",
-    "hardhat": "^2.19.0"
+    "ethers": "^6.8.0"
   },
-  "dependencies": {
-    "dotenv": "^17.2.2"
-  }
+  "keywords": [
+    "blockchain",
+    "supply-chain",
+    "sih",
+    "agritech",
+    "ethereum"
+  ]
 }
