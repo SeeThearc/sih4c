@@ -1,0 +1,16 @@
+{
+  "project": "SIH-BlockChain-2025",
+  "author": "PratTandon",
+  "network": "sepolia",
+  "timestamp": "2025-09-21T17:44:21.622Z",
+  "deployer": "0x9F75445A921F2d7023cDB0DE13c56dd39c889701",
+  "contracts": {
+    "emergencyManager": "0x56880F1110c87347fB095f1c89AC14633552c5A8",
+    "agriTraceLib": "0xa18AD321d13167105D3c123DA18317ba9d4ddfC9",
+    "agriTraceCore": "0x4791d697b2af3191E3Ff09589650f2fc8C96b7b1",
+    "temperatureOracle": "0xC3731441B0BD0909ce624f705A6d39b4226C3a09",
+    "damageDetectionOracle": "0x146fe66160E7886444ac5791A845203eC8a5181A",
+    "agriTraceBatch": "0x23d8bc46fe31F6088ed3337d863127d0Eca80B98",
+    "agriTraceQuality": "0xF588b76226944B4657c56691209f45B84a9C392d"
+  }
+}
