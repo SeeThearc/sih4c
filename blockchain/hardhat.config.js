@@ -1,15 +1,6 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("dotenv").config();
 
-// Validate required environment variables
-function requireEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`❌ Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
 // Get private key (remove 0x prefix if present)
 function getPrivateKey() {
   const key = process.env.PRIVATE_KEY;
@@ -60,45 +51,6 @@ module.exports = {
       chainId: 11155111,
       confirmations: parseInt(process.env.CONFIRMATION_BLOCKS) || 2,
     },
-
-    // 🟣 Polygon Mainnet
-    polygon: {
-      url: process.env.POLYGON_RPC_URL || "https://polygon-rpc.com",
-      accounts: getPrivateKey() ? [getPrivateKey()] : [],
-      gas: parseInt(process.env.GAS_LIMIT) || 6000000,
-      gasPrice: parseInt(process.env.GAS_PRICE) || 30000000000, // 30 gwei for Polygon
-      chainId: 137,
-      confirmations: parseInt(process.env.CONFIRMATION_BLOCKS) || 2,
-    },
-
-    // 🔵 Ethereum Mainnet
-    mainnet: {
-      url:
-        process.env.MAINNET_RPC_URL ||
-        "https://mainnet.infura.io/v3/YOUR_INFURA_KEY",
-      accounts: getPrivateKey() ? [getPrivateKey()] : [],
-      gas: parseInt(process.env.GAS_LIMIT) || 6000000,
-      gasPrice: parseInt(process.env.GAS_PRICE) || 20000000000,
-      chainId: 1,
-      confirmations: parseInt(process.env.CONFIRMATION_BLOCKS) || 6, // More confirmations for mainnet
-    },
-  },
-
-  // 🔍 Etherscan Configuration
-  etherscan: {
-    apiKey: {
-      sepolia: process.env.ETHERSCAN_API_KEY,
-      polygon: process.env.POLYGONSCAN_API_KEY,
-      mainnet: process.env.ETHERSCAN_API_KEY,
-    },
-  },
-
-  // ⛽ Gas Reporter
-  gasReporter: {
-    enabled: process.env.REPORT_GAS !== undefined,
-    currency: "USD",
-    gasPrice: 21,
-    coinmarketcap: process.env.COINMARKETCAP_API_KEY,
   },
 
   // 🧪 Test Configuration
