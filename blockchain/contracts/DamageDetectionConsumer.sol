@@ -12,7 +12,7 @@ contract DamageDetectionConsumer is ChainlinkClient, ConfirmedOwner {
     uint256 private fee;
     
     // Your ML API endpoint
-    string public apiEndpoint = "https://your-api-server.com/predict";
+    string public apiEndpoint = "http://127.0.0.1:5000/predict";
     
     // Prediction results
     struct PredictionResult {
