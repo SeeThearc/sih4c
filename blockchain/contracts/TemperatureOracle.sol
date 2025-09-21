@@ -35,7 +35,7 @@ contract TemperatureOracle is ChainlinkClient, ConfirmedOwner {
         Chainlink.Request memory request = _buildChainlinkRequest(jobId, address(this), this.fulfill.selector);
         
         // Set the URL to your Flask API
-        request._add("get", "http://127.0.0.1:5000/sensor");
+        request._add("get", "http://127.0.0.1:5001/sensor");
         
         // Set the path to find the temperature value in the response
         request._add("path", "temperature");

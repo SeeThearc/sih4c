@@ -10,7 +10,6 @@ contract EmergencyManager {
     event Unpaused(address indexed admin);
     event Blacklisted(address indexed user);
     event Unblacklisted(address indexed user);
-
     modifier onlyAdmin() {
         require(msg.sender == admin, "Only admin");
         _;
