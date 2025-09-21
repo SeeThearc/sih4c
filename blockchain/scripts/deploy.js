@@ -1,22 +1,57 @@
-const { ethers, network } = require("hardhat");
+const { ethers, network, run } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
 
 async function main() {
-  console.log("🚀 Starting AgriTrace System Deployment...");
-  console.log(`📍 Network: ${network.name}`);
-  console.log(`⏰ Date: ${new Date().toISOString()}`);
+  // 🎯 Pre-deployment Checks
+  console.log("🌾 AgriTrace Deployment Starting...");
   console.log("=" * 60);
+  console.log(`📍 Network: ${network.name}`);
+  console.log(`🔗 Chain ID: ${network.config.chainId}`);
+  console.log(`⏰ Date: ${new Date().toISOString()}`);
+  console.log(`👤 Project: SIH-BlockChain-2025 by PratTandon`);
+
+  // Check environment variables
+  if (network.name !== "hardhat" && network.name !== "localhost") {
+    console.log("\n🔍 Checking environment configuration...");
+
+    const requiredEnvVars = {
+      PRIVATE_KEY: "Deployment private key",
+      [`${network.name.toUpperCase()}_RPC_URL`]: `${network.name} RPC URL`,
+    };
+
+    for (const [envVar, description] of Object.entries(requiredEnvVars)) {
+      if (!process.env[envVar]) {
+        console.error(`❌ Missing ${description}: ${envVar}`);
+        console.error(`   Please add this to your .env file`);
+        process.exit(1);
+      } else {
+        console.log(`   ✅ ${description}: Set`);
+      }
+    }
+  }
 
   const [deployer] = await ethers.getSigners();
-  console.log(`👤 Deployer account: ${deployer.address}`);
-  console.log(
-    `💰 Account balance: ${ethers.formatEther(
-      await ethers.provider.getBalance(deployer.address)
-    )} ETH`
-  );
+  const balance = await ethers.provider.getBalance(deployer.address);
+
+  console.log(`\n👤 Deployer: ${deployer.address}`);
+  console.log(`💰 Balance: ${ethers.formatEther(balance)} ETH`);
+
+  // Check minimum balance for deployment
+  const minBalance = ethers.parseEther("0.1"); // Minimum 0.1 ETH
+  if (
+    balance < minBalance &&
+    network.name !== "hardhat" &&
+    network.name !== "localhost"
+  ) {
+    console.error(
+      `❌ Insufficient balance. Need at least 0.1 ETH for deployment.`
+    );
+    process.exit(1);
+  }
 
   const deploymentResults = {};
+  const gasUsed = {};
   const startTime = Date.now();
 
   try {
@@ -28,7 +63,14 @@ async function main() {
     const emergencyManager = await EmergencyManager.deploy(deployer.address);
     await emergencyManager.waitForDeployment();
     deploymentResults.emergencyManager = await emergencyManager.getAddress();
+
+    const emergencyReceipt = await ethers.provider.getTransactionReceipt(
+      emergencyManager.deploymentTransaction().hash
+    );
+    gasUsed.emergencyManager = emergencyReceipt.gasUsed;
+
     console.log(`✅ Emergency Manager: ${deploymentResults.emergencyManager}`);
+    console.log(`⛽ Gas used: ${gasUsed.emergencyManager.toLocaleString()}`);
 
     // 2. Deploy AgriTrace Library
     console.log("\n📋 2/7 Deploying AgriTrace Library...");
@@ -36,7 +78,14 @@ async function main() {
     const agriTraceLib = await AgriTraceLib.deploy();
     await agriTraceLib.waitForDeployment();
     deploymentResults.agriTraceLib = await agriTraceLib.getAddress();
+
+    const libReceipt = await ethers.provider.getTransactionReceipt(
+      agriTraceLib.deploymentTransaction().hash
+    );
+    gasUsed.agriTraceLib = libReceipt.gasUsed;
+
     console.log(`✅ AgriTrace Library: ${deploymentResults.agriTraceLib}`);
+    console.log(`⛽ Gas used: ${gasUsed.agriTraceLib.toLocaleString()}`);
 
     // 3. Deploy Core Contract
     console.log("\n📋 3/7 Deploying AgriTrace Core...");
@@ -44,7 +93,14 @@ async function main() {
     const agriTraceCore = await AgriTraceCore.deploy();
     await agriTraceCore.waitForDeployment();
     deploymentResults.agriTraceCore = await agriTraceCore.getAddress();
+
+    const coreReceipt = await ethers.provider.getTransactionReceipt(
+      agriTraceCore.deploymentTransaction().hash
+    );
+    gasUsed.agriTraceCore = coreReceipt.gasUsed;
+
     console.log(`✅ AgriTrace Core: ${deploymentResults.agriTraceCore}`);
+    console.log(`⛽ Gas used: ${gasUsed.agriTraceCore.toLocaleString()}`);
 
     // 4. Deploy Temperature Oracle
     console.log("\n📋 4/7 Deploying Temperature Oracle...");
@@ -54,9 +110,16 @@ async function main() {
     const temperatureOracle = await TemperatureOracle.deploy();
     await temperatureOracle.waitForDeployment();
     deploymentResults.temperatureOracle = await temperatureOracle.getAddress();
+
+    const tempReceipt = await ethers.provider.getTransactionReceipt(
+      temperatureOracle.deploymentTransaction().hash
+    );
+    gasUsed.temperatureOracle = tempReceipt.gasUsed;
+
     console.log(
       `✅ Temperature Oracle: ${deploymentResults.temperatureOracle}`
     );
+    console.log(`⛽ Gas used: ${gasUsed.temperatureOracle.toLocaleString()}`);
 
     // 5. Deploy Damage Detection Oracle
     console.log("\n📋 5/7 Deploying Damage Detection Oracle...");
@@ -67,8 +130,17 @@ async function main() {
     await damageDetectionOracle.waitForDeployment();
     deploymentResults.damageDetectionOracle =
       await damageDetectionOracle.getAddress();
+
+    const damageReceipt = await ethers.provider.getTransactionReceipt(
+      damageDetectionOracle.deploymentTransaction().hash
+    );
+    gasUsed.damageDetectionOracle = damageReceipt.gasUsed;
+
     console.log(
       `✅ Damage Detection Oracle: ${deploymentResults.damageDetectionOracle}`
+    );
+    console.log(
+      `⛽ Gas used: ${gasUsed.damageDetectionOracle.toLocaleString()}`
     );
 
     // 6. Deploy Batch Contract
@@ -79,7 +151,14 @@ async function main() {
     );
     await agriTraceBatch.waitForDeployment();
     deploymentResults.agriTraceBatch = await agriTraceBatch.getAddress();
+
+    const batchReceipt = await ethers.provider.getTransactionReceipt(
+      agriTraceBatch.deploymentTransaction().hash
+    );
+    gasUsed.agriTraceBatch = batchReceipt.gasUsed;
+
     console.log(`✅ AgriTrace Batch: ${deploymentResults.agriTraceBatch}`);
+    console.log(`⛽ Gas used: ${gasUsed.agriTraceBatch.toLocaleString()}`);
 
     // 7. Deploy Quality Contract
     console.log("\n📋 7/7 Deploying AgriTrace Quality...");
@@ -92,105 +171,158 @@ async function main() {
     );
     await agriTraceQuality.waitForDeployment();
     deploymentResults.agriTraceQuality = await agriTraceQuality.getAddress();
-    console.log(`✅ AgriTrace Quality: ${deploymentResults.agriTraceQuality}`);
 
+    const qualityReceipt = await ethers.provider.getTransactionReceipt(
+      agriTraceQuality.deploymentTransaction().hash
+    );
+    gasUsed.agriTraceQuality = qualityReceipt.gasUsed;
+
+    console.log(`✅ AgriTrace Quality: ${deploymentResults.agriTraceQuality}`);
+    console.log(`⛽ Gas used: ${gasUsed.agriTraceQuality.toLocaleString()}`);
+
+    // Calculate total gas used
+    const totalGasUsed = Object.values(gasUsed).reduce(
+      (sum, gas) => sum + gas,
+      0n
+    );
+    console.log(`\n⛽ Total Gas Used: ${totalGasUsed.toLocaleString()}`);
+
+    // Setup contract connections
     console.log("\n🔗 Setting up contract connections...");
 
-    // Set batch contract in core
-    console.log("   → Setting batch contract in core...");
-    const setBatchTx = await agriTraceCore.setBatchContract(
-      deploymentResults.agriTraceBatch
+    const setupTxs = [];
+
+    setupTxs.push(
+      await agriTraceCore.setBatchContract(deploymentResults.agriTraceBatch)
     );
-    await setBatchTx.wait();
-
-    // Set quality contract in core
-    console.log("   → Setting quality contract in core...");
-    const setQualityTx = await agriTraceCore.setQualityContract(
-      deploymentResults.agriTraceQuality
+    setupTxs.push(
+      await agriTraceCore.setQualityContract(deploymentResults.agriTraceQuality)
     );
-    await setQualityTx.wait();
-
-    // Set temperature oracle in core
-    console.log("   → Setting temperature oracle in core...");
-    const setTempOracleTx = await agriTraceCore.setTemperatureOracle(
-      deploymentResults.temperatureOracle
+    setupTxs.push(
+      await agriTraceCore.setTemperatureOracle(
+        deploymentResults.temperatureOracle
+      )
     );
-    await setTempOracleTx.wait();
-
-    // Set temperature oracle in quality contract
-    console.log("   → Setting temperature oracle in quality contract...");
-    const setTempOracleQualityTx = await agriTraceQuality.setTemperatureOracle(
-      deploymentResults.temperatureOracle
+    setupTxs.push(
+      await agriTraceQuality.setTemperatureOracle(
+        deploymentResults.temperatureOracle
+      )
     );
-    await setTempOracleQualityTx.wait();
-
-    // Set damage detection oracle in quality contract
-    console.log("   → Setting damage detection oracle in quality contract...");
-    const setDamageOracleTx = await agriTraceQuality.setDamageDetectionOracle(
-      deploymentResults.damageDetectionOracle
+    setupTxs.push(
+      await agriTraceQuality.setDamageDetectionOracle(
+        deploymentResults.damageDetectionOracle
+      )
     );
-    await setDamageOracleTx.wait();
 
-    console.log("✅ All contract connections established!");
+    // Wait for all setup transactions
+    await Promise.all(setupTxs.map((tx) => tx.wait()));
+    console.log(`✅ All ${setupTxs.length} setup transactions completed`);
 
-    // Verify deployment
+    // Verification
     console.log("\n🔍 Verifying deployment...");
-
-    const batchAddress = await agriTraceCore.batchContract();
-    const qualityAddress = await agriTraceCore.qualityContract();
-    const tempOracleAddress = await agriTraceCore.temperatureOracle();
-
-    console.log(`   ✅ Batch contract in core: ${batchAddress}`);
-    console.log(`   ✅ Quality contract in core: ${qualityAddress}`);
-    console.log(`   ✅ Temperature oracle in core: ${tempOracleAddress}`);
-
-    // Verify admin role
     const adminRole = await agriTraceCore.getRole(deployer.address);
-    console.log(
-      `   ✅ Admin role assigned: ${adminRole === 4n ? "YES" : "NO"}`
-    );
-
-    // Setup initial roles (optional demo users)
-    if (network.name === "localhost" || network.name === "hardhat") {
-      console.log("\n👥 Setting up demo roles for local network...");
-      const signers = await ethers.getSigners();
-
-      if (signers.length >= 4) {
-        await agriTraceCore.assignRole(signers[1].address, 1); // FARMER
-        await agriTraceCore.assignRole(signers[2].address, 2); // DISTRIBUTOR
-        await agriTraceCore.assignRole(signers[3].address, 3); // RETAILER
-
-        console.log(`   ✅ Demo Farmer: ${signers[1].address}`);
-        console.log(`   ✅ Demo Distributor: ${signers[2].address}`);
-        console.log(`   ✅ Demo Retailer: ${signers[3].address}`);
-      }
-    }
+    console.log(`✅ Admin role verified: ${adminRole === 4n ? "YES" : "NO"}`);
 
     const deploymentTime = (Date.now() - startTime) / 1000;
-    console.log(
-      `\n🎉 Deployment completed successfully in ${deploymentTime}s!`
-    );
+    console.log(`\n🎉 Deployment completed in ${deploymentTime}s!`);
 
     // Save deployment info
-    await saveDeploymentInfo(deploymentResults, network.name, deployer.address);
+    await saveDeploymentInfo(
+      deploymentResults,
+      gasUsed,
+      network.name,
+      deployer.address,
+      deploymentTime
+    );
 
-    // Generate frontend config
-    await generateFrontendConfig(deploymentResults, network.name);
+    // Generate configs
+    await generateConfigs(deploymentResults, network.name);
 
-    // Display summary
-    displayDeploymentSummary(deploymentResults, network.name, deploymentTime);
+    // Auto-verify on testnets/mainnet
+    if (
+      network.name !== "hardhat" &&
+      network.name !== "localhost" &&
+      process.env.ETHERSCAN_API_KEY
+    ) {
+      console.log("\n🔍 Starting contract verification...");
+      await verifyContracts(deploymentResults, deployer.address);
+    }
+
+    displaySummary(deploymentResults, gasUsed, network.name, deploymentTime);
 
     return deploymentResults;
   } catch (error) {
-    console.error("❌ Deployment failed:", error);
+    console.error("\n💥 Deployment failed:");
+    console.error(error);
     throw error;
+  }
+}
+
+async function verifyContracts(deploymentResults, deployerAddress) {
+  const verifyPromises = [];
+
+  try {
+    // Verify Emergency Manager
+    verifyPromises.push(
+      run("verify:verify", {
+        address: deploymentResults.emergencyManager,
+        constructorArguments: [deployerAddress],
+      }).catch((e) =>
+        console.log(`⚠️  Emergency Manager verification: ${e.message}`)
+      )
+    );
+
+    // Verify other contracts (no constructor args)
+    const noArgContracts = [
+      "agriTraceLib",
+      "agriTraceCore",
+      "temperatureOracle",
+      "damageDetectionOracle",
+    ];
+    noArgContracts.forEach((contract) => {
+      verifyPromises.push(
+        run("verify:verify", {
+          address: deploymentResults[contract],
+          constructorArguments: [],
+        }).catch((e) =>
+          console.log(`⚠️  ${contract} verification: ${e.message}`)
+        )
+      );
+    });
+
+    // Verify contracts with constructor args
+    verifyPromises.push(
+      run("verify:verify", {
+        address: deploymentResults.agriTraceBatch,
+        constructorArguments: [deploymentResults.agriTraceCore],
+      }).catch((e) => console.log(`⚠️  Batch verification: ${e.message}`))
+    );
+
+    verifyPromises.push(
+      run("verify:verify", {
+        address: deploymentResults.agriTraceQuality,
+        constructorArguments: [
+          deploymentResults.agriTraceCore,
+          deploymentResults.agriTraceBatch,
+        ],
+      }).catch((e) => console.log(`⚠️  Quality verification: ${e.message}`))
+    );
+
+    await Promise.all(verifyPromises);
+    console.log("✅ Contract verification completed");
+  } catch (error) {
+    console.log(
+      `⚠️  Some contracts may not have been verified: ${error.message}`
+    );
   }
 }
 
 async function saveDeploymentInfo(
   deploymentResults,
+  gasUsed,
   networkName,
-  deployerAddress
+  deployerAddress,
+  deploymentTime
 ) {
   const deploymentsDir = path.join(__dirname, "..", "deployments");
   if (!fs.existsSync(deploymentsDir)) {
@@ -198,170 +330,138 @@ async function saveDeploymentInfo(
   }
 
   const deploymentInfo = {
+    project: "SIH-BlockChain-2025",
+    author: "PratTandon",
     network: networkName,
+    chainId: network.config.chainId,
     timestamp: new Date().toISOString(),
+    deploymentTime: deploymentTime,
     deployer: deployerAddress,
     contracts: deploymentResults,
-    gasUsed: "N/A", // Could be tracked if needed
+    gasUsage: Object.fromEntries(
+      Object.entries(gasUsed).map(([key, value]) => [key, value.toString()])
+    ),
+    totalGasUsed: Object.values(gasUsed)
+      .reduce((sum, gas) => sum + gas, 0n)
+      .toString(),
     status: "success",
   };
 
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")
+    .split("T")[0];
   const filename = `${networkName}-${timestamp}.json`;
   const filepath = path.join(deploymentsDir, filename);
 
   fs.writeFileSync(filepath, JSON.stringify(deploymentInfo, null, 2));
 
-  // Also save as latest
   const latestPath = path.join(deploymentsDir, `${networkName}-latest.json`);
   fs.writeFileSync(latestPath, JSON.stringify(deploymentInfo, null, 2));
 
-  console.log(`💾 Deployment info saved to: deployments/${filename}`);
+  console.log(`💾 Deployment saved: deployments/${filename}`);
 }
 
-async function generateFrontendConfig(deploymentResults, networkName) {
+async function generateConfigs(deploymentResults, networkName) {
   const configDir = path.join(__dirname, "..", "frontend-config");
   if (!fs.existsSync(configDir)) {
     fs.mkdirSync(configDir, { recursive: true });
   }
 
+  // Frontend configuration
   const frontendConfig = {
-    networkName: networkName,
-    chainId: network.config.chainId || 31337,
+    project: "SIH-BlockChain-2025",
+    network: networkName,
+    chainId: network.config.chainId,
     deploymentDate: new Date().toISOString(),
-    contracts: {
-      AgriTraceCore: {
-        address: deploymentResults.agriTraceCore,
-        abi: "./artifacts/contracts/AgriTraceCore.sol/AgriTraceCore.json",
-      },
-      AgriTraceBatch: {
-        address: deploymentResults.agriTraceBatch,
-        abi: "./artifacts/contracts/AgriTraceBatch.sol/AgriTraceBatch.json",
-      },
-      AgriTraceQuality: {
-        address: deploymentResults.agriTraceQuality,
-        abi: "./artifacts/contracts/AgriTraceQuality.sol/AgriTraceQuality.json",
-      },
-      TemperatureOracle: {
-        address: deploymentResults.temperatureOracle,
-        abi: "./artifacts/contracts/TemperatureOracle.sol/TemperatureOracle.json",
-      },
-      DamageDetectionConsumer: {
-        address: deploymentResults.damageDetectionOracle,
-        abi: "./artifacts/contracts/DamageDetectionConsumer.sol/DamageDetectionConsumer.json",
-      },
-      EmergencyManager: {
-        address: deploymentResults.emergencyManager,
-        abi: "./artifacts/contracts/EmergencyManager.sol/EmergencyManager.json",
-      },
-      AgriTraceLib: {
-        address: deploymentResults.agriTraceLib,
-        abi: "./artifacts/contracts/AgriTraceLib.sol/AgriTraceLib.json",
-      },
-    },
+    contracts: deploymentResults,
+    rpcUrl: network.config.url,
+    explorerUrl: getExplorerUrl(networkName),
   };
 
-  const configPath = path.join(configDir, `contracts-${networkName}.json`);
-  fs.writeFileSync(configPath, JSON.stringify(frontendConfig, null, 2));
+  fs.writeFileSync(
+    path.join(configDir, `${networkName}-config.json`),
+    JSON.stringify(frontendConfig, null, 2)
+  );
 
-  // Also create a JavaScript module for easy import
-  const jsConfigPath = path.join(configDir, `contracts-${networkName}.js`);
-  const jsContent = `// AgriTrace Contract Configuration for ${networkName}
-// Generated on: ${new Date().toISOString()}
+  // JavaScript/TypeScript module
+  const jsConfig = `// AgriTrace Configuration for ${networkName}
+// Generated: ${new Date().toISOString()}
+// Project: SIH-BlockChain-2025
 
-export const NETWORK_NAME = "${networkName}";
-export const CHAIN_ID = ${network.config.chainId || 31337};
+export const NETWORK = "${networkName}";
+export const CHAIN_ID = ${network.config.chainId};
 
-export const CONTRACTS = ${JSON.stringify(frontendConfig.contracts, null, 2)};
+export const CONTRACTS = ${JSON.stringify(deploymentResults, null, 2)};
+
+export const RPC_URL = "${network.config.url}";
+export const EXPLORER_URL = "${getExplorerUrl(networkName)}";
 
 export default {
-    networkName: NETWORK_NAME,
+    network: NETWORK,
     chainId: CHAIN_ID,
-    contracts: CONTRACTS
+    contracts: CONTRACTS,
+    rpcUrl: RPC_URL,
+    explorerUrl: EXPLORER_URL
 };
 `;
-  fs.writeFileSync(jsConfigPath, jsContent);
 
+  fs.writeFileSync(path.join(configDir, `${networkName}-config.js`), jsConfig);
   console.log(
-    `🔧 Frontend config saved to: frontend-config/contracts-${networkName}.json`
-  );
-  console.log(
-    `🔧 JavaScript config saved to: frontend-config/contracts-${networkName}.js`
+    `🔧 Frontend config generated: frontend-config/${networkName}-config.json`
   );
 }
 
-function displayDeploymentSummary(
+function getExplorerUrl(networkName) {
+  const explorers = {
+    mainnet: "https://etherscan.io",
+    sepolia: "https://sepolia.etherscan.io",
+    polygon: "https://polygonscan.com",
+    localhost: "http://localhost:8545",
+    hardhat: "http://localhost:8545",
+  };
+  return explorers[networkName] || "";
+}
+
+function displaySummary(
   deploymentResults,
+  gasUsed,
   networkName,
   deploymentTime
 ) {
-  console.log("\n" + "=" * 60);
-  console.log("📋 DEPLOYMENT SUMMARY");
-  console.log("=" * 60);
+  console.log("\n" + "=".repeat(80));
+  console.log("🎉 AGRITRACE DEPLOYMENT COMPLETE - SIH-BlockChain-2025");
+  console.log("=".repeat(80));
   console.log(`🌐 Network: ${networkName}`);
-  console.log(`⏱️  Deployment Time: ${deploymentTime}s`);
+  console.log(`⏱️  Time: ${deploymentTime}s`);
   console.log(`📅 Date: ${new Date().toISOString()}`);
-  console.log("\n📝 Deployed Contracts:");
+  console.log(`👤 Author: PratTandon`);
 
-  const contractNames = {
-    emergencyManager: "Emergency Manager",
-    agriTraceLib: "AgriTrace Library",
-    agriTraceCore: "AgriTrace Core",
-    temperatureOracle: "Temperature Oracle",
-    damageDetectionOracle: "Damage Detection Oracle",
-    agriTraceBatch: "AgriTrace Batch",
-    agriTraceQuality: "AgriTrace Quality",
-  };
-
-  Object.entries(deploymentResults).forEach(([key, address]) => {
-    console.log(`   ✅ ${contractNames[key] || key}: ${address}`);
+  console.log("\n📋 Contract Addresses:");
+  Object.entries(deploymentResults).forEach(([name, address]) => {
+    console.log(`   ${name.padEnd(25)}: ${address}`);
   });
 
-  console.log("\n🔗 Integration URLs:");
-  if (networkName === "sepolia") {
-    Object.entries(deploymentResults).forEach(([key, address]) => {
+  const totalGas = Object.values(gasUsed).reduce((sum, gas) => sum + gas, 0n);
+  console.log(`\n⛽ Total Gas Used: ${totalGas.toLocaleString()}`);
+
+  if (networkName !== "hardhat" && networkName !== "localhost") {
+    console.log(`\n🔍 Block Explorer:`);
+    Object.entries(deploymentResults).forEach(([name, address]) => {
       console.log(
-        `   🔍 ${contractNames[key]}: https://sepolia.etherscan.io/address/${address}`
-      );
-    });
-  } else if (networkName === "polygon") {
-    Object.entries(deploymentResults).forEach(([key, address]) => {
-      console.log(
-        `   🔍 ${contractNames[key]}: https://polygonscan.com/address/${address}`
-      );
-    });
-  } else if (networkName === "mainnet") {
-    Object.entries(deploymentResults).forEach(([key, address]) => {
-      console.log(
-        `   🔍 ${contractNames[key]}: https://etherscan.io/address/${address}`
+        `   ${name}: ${getExplorerUrl(networkName)}/address/${address}`
       );
     });
   }
 
-  console.log("\n📁 Generated Files:");
-  console.log(`   📄 deployments/${networkName}-latest.json`);
-  console.log(`   📄 frontend-config/contracts-${networkName}.json`);
-  console.log(`   📄 frontend-config/contracts-${networkName}.js`);
-
-  console.log("\n🚀 Next Steps:");
-  console.log("   1. Update your frontend with the new contract addresses");
-  console.log("   2. Configure your oracles with the deployed addresses");
-  console.log("   3. Set up monitoring and alerts");
-  console.log("   4. Test the deployed contracts");
-
-  if (networkName !== "mainnet") {
-    console.log("   5. Verify contracts on block explorer");
-  }
-
-  console.log("=" * 60);
+  console.log("\n🚀 Ready for integration!");
+  console.log("=".repeat(80));
 }
 
-// Handle script execution
 if (require.main === module) {
   main()
     .then(() => process.exit(0))
     .catch((error) => {
-      console.error("💥 Deployment failed with error:");
       console.error(error);
       process.exit(1);
     });
